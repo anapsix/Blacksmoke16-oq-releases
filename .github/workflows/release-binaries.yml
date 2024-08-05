@@ -1,0 +1,121 @@
+name: Release binaries
+
+on:
+  schedule:
+  - cron: '00 10 * * *'
+  push:
+    branches:
+    - 'workflow-test'
+
+concurrency:
+  group: release-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  attestations: read
+  checks: read
+  contents: write
+  deployments: read
+  issues: read
+  discussions: read
+  packages: read
+  pages: read
+  pull-requests: read
+  repository-projects: read
+  security-events: read
+  statuses: read
+
+env:
+  REPO: ${{ github.repository }}
+  UPSTREAM_REPO: Blacksmoke16/oq
+  UPSTREAM_DIR: ./upstream
+  TARGET_ARCH_LIST: '["arm64","amd64"]'
+
+jobs:
+  release_info:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.info.outputs.release_tag }}
+      create_release: ${{ steps.info.outputs.create_release }}
+    steps:
+    - name: Prepare release info
+      id: info
+      uses: actions/github-script@v7
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        script: |
+          const {REPO, UPSTREAM_REPO} = process.env;
+          const [owner, repo] = REPO.split("/");
+          const [uowner, urepo] = UPSTREAM_REPO.split("/");
+
+          core.startGroup(`Getting release info for '${UPSTREAM_REPO}'`);
+          const ulatest_release = await github.rest.repos.getLatestRelease({
+            owner: uowner,
+            repo: urepo,
+          });
+
+          core.debug(`Upsteam latests release data:\n${JSON.stringify(ulatest_release)}`);
+          const ulatest_release_tag = ulatest_release.data.tag_name;
+          core.info(`Latest release in '${UPSTREAM_REPO}' is '${ulatest_release_tag}'`);
+          if (ulatest_release_tag.status != 200 && typeof(ulatest_release_tag) == 'undefined') {
+            core.setFailed(`Failed to get release tag for '${UPSTREAM_REPO}'`);
+          }
+          core.endGroup();
+
+          var matching_release = undefined;
+          var create_release = true;
+          core.startGroup(`Getting matching release in '${REPO}'`);
+          try {
+            matching_release = await github.rest.repos.getReleaseByTag({
+              owner: owner,
+              repo: repo,
+              tag: ulatest_release_tag,
+            });
+          } catch (e) {
+            core.info(`The matching release is not found for '${ulatest_release_tag}' tag`);
+            if (e.name != 'HttpError') {
+              core.setFailed(`Failed to get matching release, with error ${e}`);
+            }
+          }
+          core.debug(`Matching release data:\n${JSON.stringify(matching_release)}`);
+          if (typeof(matching_release) != 'undefined' && matching_release.status == 200) {
+            create_release = false;
+          }
+          core.endGroup();
+
+          core.warning(`release_tag: ${ulatest_release_tag}`);
+          core.warning(`create_release: ${create_release}`);
+          core.setOutput('release_tag', ulatest_release_tag);
+          core.setOutput('create_release', create_release);
+  dist_linux:
+    runs-on: ubuntu-latest
+    needs: release_info
+    if: ${{ needs.release_info.outputs.create_release == 'true' }}
+    steps:
+    - name: Checkout hack
+      uses: actions/checkout@v4
+    - name: Checkout oq
+      uses: actions/checkout@v4
+      with:
+        repository: Blacksmoke16/oq
+        path: ${{ env.UPSTREAM_DIR }}
+        fetch-tags: true
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Build
+      run: ./hack/dist/build.sh
+    - name: Upload release artifacts
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ./bin/oq-*
+        tag_name: ${{ needs.release_info.outputs.release_tag }}
+        make_latest: "true"
+        body: |
+          Corresponds to [${{ needs.release_info.outputs.release_tag }}][1] release in [Blacksmoke16/oq][2].
+
+          [1]: https://github.com/Blacksmoke16/oq/releases/tag/${{ needs.release_info.outputs.release_tag }}
+          [2]: https://github.com/Blacksmoke16/oq

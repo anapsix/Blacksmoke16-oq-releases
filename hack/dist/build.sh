@@ -6,7 +6,7 @@ export BUILDKIT_PROGRESS=plain
 
 SCRIPT_DIR="$(realpath $(dirname $0))"
 REPO_ROOT="${SCRIPT_DIR}/../../"
-: ${OQ_UPSTREAM_DIR:="${REPO_ROOT}/upstream"}
+: ${UPSTREAM_DIR:="${REPO_ROOT}/upstream"}
 
 : ${TARGET_ARCH_LIST:='["arm64","amd64"]'}
 export TARGET_ARCH_LIST=( $(jq -r .[] <<< ${TARGET_ARCH_LIST}) )

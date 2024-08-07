@@ -29,6 +29,7 @@ permissions:
 
 env:
   GHCR_REPO: ${{ format('ghcr.io/{0}/oq', github.repository_owner) }}
+  DOCKERHUB_REPO: ${{ format('docker.io/{0}/oq', github.repository_owner) }}
   UPSTREAM_REPO: Blacksmoke16/oq
   UPSTREAM_DIR: ./upstream
   TARGET_ARCH_LIST: '["arm64","amd64"]'
@@ -40,8 +41,10 @@ jobs:
       release_tag: ${{ steps.info.outputs.release_tag }}
       create_release: ${{ steps.info.outputs.create_release }}
       push_to_ghcr: ${{ steps.check_ghcr.outputs.push_to_ghcr }}
+      push_to_dockerhub: ${{ steps.check_dockerhub.outputs.push_to_dockerhub }}
     steps:
-    - name: Prepare release info
+    -
+      name: Prepare release info
       id: info
       uses: actions/github-script@v7
       env:
@@ -59,13 +62,13 @@ jobs:
             owner: uowner,
             repo: urepo,
           });
+          const ulatest_release_tag = ulatest_release.data.tag_name || undefined;
 
           core.debug(`Upsteam latests release data:\n${JSON.stringify(ulatest_release)}`);
-          const ulatest_release_tag = ulatest_release.data.tag_name;
-          core.info(`Latest release in '${UPSTREAM_REPO}' is '${ulatest_release_tag}'`);
-          if (ulatest_release_tag.status != 200 && typeof(ulatest_release_tag) == 'undefined') {
+          if (ulatest_release.status != 200 || typeof(ulatest_release_tag) == 'undefined') {
             core.setFailed(`Failed to get release tag for '${UPSTREAM_REPO}'`);
           }
+          core.info(`Latest release in '${UPSTREAM_REPO}' is '${ulatest_release_tag}'`);
           core.endGroup();
 
           var matching_release = undefined;
@@ -93,90 +96,136 @@ jobs:
           core.warning(`create_release: ${create_release}`);
           core.setOutput('release_tag', ulatest_release_tag);
           core.setOutput('create_release', create_release);
-    - name: Login to GHCR
+    -
+      name: Login to GHCR
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - name: Check GHCR
+    -
+      name: Check GHCR
       id: check_ghcr
       env:
         RELEASE_TAG: ${{ steps.info.outputs.release_tag }}
       run: |
-        if docker manifest inspect "${GHCR_REPO}:${RELEASE_TAG}" >/dev/null; then
+        if docker buildx imagetools inspect "${GHCR_REPO}:${RELEASE_TAG}" >/dev/null; then
           echo "push_to_ghcr=false" | tee -a "${GITHUB_OUTPUT}"
         else
           echo "push_to_ghcr=true" | tee -a "${GITHUB_OUTPUT}"
         fi
+    -
+      name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.DOCKERHUB_RW }}
+    -
+      name: Check DockerHub
+      id: check_dockerhub
+      env:
+        RELEASE_TAG: ${{ steps.info.outputs.release_tag }}
+      run: |
+        if docker buildx imagetools inspect "${DOCKERHUB_REPO}:${RELEASE_TAG}" >/dev/null; then
+          echo "push_to_dockerhub=false" | tee -a "${GITHUB_OUTPUT}"
+        else
+          echo "push_to_dockerhub=true" | tee -a "${GITHUB_OUTPUT}"
+        fi
   dist_linux:
     runs-on: ubuntu-latest
     needs: release_info
-    if: ${{ needs.release_info.outputs.create_release == 'true' || needs.release_info.outputs.push_to_ghcr == 'true' }}
+    if: ${{ needs.release_info.outputs.create_release == 'true' || needs.release_info.outputs.push_to_ghcr == 'true' || needs.release_info.outputs.push_to_dockerhub == 'true'}}
+    env:
+      PUSH_TO_DOCKERHUB: ${{ needs.release_info.outputs.push_to_dockerhub == 'true' }}
+      PUSH_TO_GHCR: ${{ needs.release_info.outputs.push_to_ghcr == 'true' }}
+      RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
     outputs:
-      images: ${{ steps.get_package_info.outputs.images }}
-      release_body: ${{ steps.get_package_info.outputs.release_body }}
+      images_ghcr: ${{ steps.get_ghcr_package.outputs.images }}
+      release_body_ghcr: ${{ steps.get_ghcr_package.outputs.release_body }}
+      images_dockerhub: ${{ steps.get_dockerhub_package.outputs.images }}
+      # release_body_dockerhub: ${{ steps.get_dockerhub_package.outputs.release_body }}
     steps:
-    - name: Checkout hack
+    -
+      name: Checkout hack
       uses: actions/checkout@v4
-    - name: Checkout oq
+    -
+      name: Checkout oq
       uses: actions/checkout@v4
       with:
         repository: ${{ env.UPSTREAM_REPO }}
         path: ${{ env.UPSTREAM_DIR }}
         fetch-tags: true
-    - name: Set up QEMU
+    -
+      name: Set up QEMU
       uses: docker/setup-qemu-action@v3
-    - name: Set up Docker Buildx
+    -
+      name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
-    - name: Build
+    -
+      name: Build
       run: ./hack/dist/build.sh
-    - name: Login to GitHub Container Registry
+    -
+      name: Login to GHCR
       uses: docker/login-action@v3
-      if: ${{ needs.release_info.outputs.push_to_ghcr == 'true' }}
+      if: ${{ env.PUSH_TO_GHCR == 'true' }}
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    - name: Push to GHCR
-      id: push_to_ghcr
-      if: ${{ needs.release_info.outputs.push_to_ghcr == 'true' }}
-      env:
-        RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      if: ${{ env.PUSH_TO_DOCKERHUB == 'true' }}
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.DOCKERHUB_RW }}
+    -
+      name: Push to registries
+      id: push_to_registries
+      if: ${{ env.PUSH_TO_DOCKERHUB == 'true' || env.PUSH_TO_GHCR == 'true' }}
       run: |
         export TARGET_ARCH_LIST=( $(jq -r .[] <<< ${TARGET_ARCH_LIST}) )
         UNNAME_M="$(uname -m)"
         OQ_BIN="$(find ./bin -type f -executable -name "*${UNNAME_M}*")"
-        for arch in ${TARGET_ARCH_LIST[@]}; do
-          echo "::group::linux/${arch}"
-          arch_tag="${RELEASE_TAG}-${arch}"
-          arch_uri="${GHCR_REPO}:${arch_tag}"
-          docker tag "oq:${arch}" "${arch_uri}"
-          docker push "${arch_uri}"
-          echo "::info::pushed ${arch_uri}"
-          docker manifest create --amend "${GHCR_REPO}:${RELEASE_TAG}" "${arch_uri}"
-          echo "::info::added to the manifest"
+        publish_arch() {
+          local _repo="${1:?required}"
+          local _arch
+          local _arch_tag
+          local _arch_uri
+
+          for _arch in ${TARGET_ARCH_LIST[@]}; do
+            echo "::group::${_repo} linux/${_arch}"
+            _arch_tag="${RELEASE_TAG}-${_arch}"
+            _arch_uri="${_repo}:${_arch_tag}"
+            docker tag "oq:${_arch}" "${_arch_uri}"
+            docker push "${_arch_uri}"
+            echo "::info::pushed ${_arch_uri}"
+            docker manifest create --amend "${_repo}:${RELEASE_TAG}" "${_arch_uri}"
+            echo "::info::added to the manifest"
+            echo "::endgroup::"
+          done
+
+          echo "::group::pushing manifest"
+          docker manifest push "${_repo}:${RELEASE_TAG}"
+          echo "::info::pushed ${_repo}:${RELEASE_TAG}"
           echo "::endgroup::"
-          arch_digest="$(docker images --no-trunc --quiet "${arch_uri}")"
-          arch_digests+="\n- arch: $arch\n  digest: ${arch_digest}\n  tag: ${arch_tag}\n  uri: ${arch_uri}"
-        done
-        echo "::group::pushing manifest"
-        docker manifest push "${GHCR_REPO}:${RELEASE_TAG}"
-        echo "::info::pushed ${GHCR_REPO}:${RELEASE_TAG}"
-        echo "::endgroup::"
-        echo "::group::recording digests"
-        MANIFEST_DIGEST="$(docker buildx imagetools \
-          inspect "${GHCR_REPO}:${RELEASE_TAG}" --format '{{json .}}' \
-          | jq -r .manifest.digest)"
-        arch_digests+="\n- arch: multi\n  digest: ${MANIFEST_DIGEST}\n  tag: ${RELEASE_TAG}\n  uri: ${GHCR_REPO}:${RELEASE_TAG}"
-        ARCH_DIGESTS="$(echo -e "${arch_digests}" | ${OQ_BIN} -i yaml -c .)"
-        echo "arch_digests=${ARCH_DIGESTS}" | tee -a "${GITHUB_OUTPUT}"
-        echo "::endgroup::"
-    - name: Get package info
-      id: get_package_info
+
+          echo "::group::inspecting digests"
+          docker buildx imagetools \
+            inspect "${_repo}:${RELEASE_TAG}" --format '{{json .}}' \
+            | jq -r .manifest.digest || true
+          echo "::endgroup::"
+        }
+
+        if [[ "${PUSH_TO_DOCKERHUB}" == "true" ]]; then
+          publish_arch "${DOCKERHUB_REPO}"
+        fi
+        if [[ "${PUSH_TO_GHCR}" == "true" ]]; then
+          publish_arch "${GHCR_REPO}"
+        fi
+    -
+      name: Get GHCR package info
+      id: get_ghcr_package
       uses: actions/github-script@v7
-      env:
-        RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
       with:
         retries: 5
         retry-exempt-status-codes: 400,401,403,404
@@ -236,6 +285,85 @@ jobs:
           core.debug(`release_body: ${releaseBody}`);
           core.setOutput('images', images);
           core.setOutput('release_body', releaseBody);
+    -
+      name: Get Docker Hub package info
+      id: get_dockerhub_package
+      uses: actions/github-script@v7
+      env:
+        DOCKERHUB_RW: ${{ secrets.DOCKERHUB_RW }}
+      with:
+        retries: 5
+        retry-exempt-status-codes: 400,401,403,404
+        script: |
+          const http = require('http');
+          const {DOCKERHUB_REPO, DOCKERHUB_RW, RELEASE_TAG, UPSTREAM_REPO} = process.env;
+          const [dockerhub_domain, dockerhub_owner, dockerhub_package] = DOCKERHUB_REPO.split("/");
+
+          var dockerhub_token;
+
+          await fetch(`https://hub.docker.com/v2/users/login`, {
+            method: 'post',
+            body: {
+              username: "anapsix",
+              password: DOCKERHUB_RW,
+            },
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'Content-Type': 'application/json'
+            },
+          })
+          .then(function (response) {
+            dockerhub_token = response.data.token;
+          })
+          .catch(function (error) {
+            core.error('Failed to get Docker Hub token');
+            core.error(error);
+            core.setFailed('Failed to get Docker Hub token');
+          });
+
+          core.info(`Listing images for ${dockerhub_owner}/${dockerhub_package}`);
+          var images, packages;
+
+          await fetch(`https://hub.docker.com/v2/namespaces/${dockerhub_owner}/repositories/${dockerhub_package}/tags/?page_size=100`, {
+            method: 'get',
+            headers: {
+              'Authorization': `Bearer ${dockerhub_token}`,
+              'Content-Type': 'application/json'
+            },
+          })
+          .then(function (response) {
+            packages = response.data.results;
+            images = packages.filter(tag => tag.id.startsWith(tag_prefix));
+
+            .map(tag => {
+              const arch = tag.id.split("-")[1] || "multi";
+              return {
+                arch: arch,
+                digest: tag.images.digest,
+                tag: tag.id,
+                uri: `${DOCKERHUB_REPO}:${tag.id}`,
+            }});
+           })
+          .catch(function (error) {
+            core.error('Failed to list images in Docker Hub');
+            core.error(error);
+            core.setFailed('Failed to list images in Docker Hub');
+          });
+
+          # const releaseBody =
+          # `Corresponds to [${RELEASE_TAG}][1] release in [${UPSTREAM_REPO}][2].
+
+          # The following corresponding Docker images are available:
+          # ${images.map(i => `- [\`${i.uri}\`](${i.html_url})`).join('\n')}
+
+          # [1]: https://github.com/${UPSTREAM_REPO}/releases/tag/${RELEASE_TAG}
+          # [2]: https://github.com/${UPSTREAM_REPO}
+          # `;
+
+          core.debug(`images: ${JSON.stringify(images)}`);
+          # core.debug(`release_body: ${releaseBody}`);
+          core.setOutput('images', images);
+          # core.setOutput('release_body', releaseBody);
     - name: Upload release artifacts
       uses: softprops/action-gh-release@v2
       if: ${{ needs.release_info.outputs.create_release == 'true' }}

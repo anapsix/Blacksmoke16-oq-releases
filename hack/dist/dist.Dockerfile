@@ -64,11 +64,24 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
     ln -s ${OQ_BIN} /usr/local/bin/oq
     echo >&2 "## verifying OQ binary and checking version"
     oq --version
+    echo >&2 "## recording "
 SCRIPT
 
 FROM busybox:stable-musl as release
-ARG OQ_BIN_DIR
+LABEL org.opencontainers.image.source=https://github.com/anapsix/Blacksmoke16-oq-releases
+LABEL org.opencontainers.image.description="From https://github.com/Blacksmoke16/oq. A performant, portable jq wrapper that facilitates the consumption and output of formats other than JSON; using jq filters to transform the data."
+LABEL org.opencontainers.image.licenses=MIT
+ARG OQ_BIN_DIR JQ_VERSION
+ENV JQ_VERSION=${JQ_VERSION}
 COPY --link --from=build ${OQ_BIN_DIR}/* /usr/local/bin/
-RUN cd /usr/local/bin && find . -type f -executable -name "oq*" -exec ln -s {} oq \;
+RUN <<-SCRIPT
+  #!/usr/bin/env sh
+  set -euo pipefail
+  cd /usr/local/bin
+  find . -type f -executable -name "oq*" -exec ln -s {} oq \;
+  OQ_VERSION="$(oq --version | oq -i yaml -r .oq)"
+  echo "export OQ_VERSION=${OQ_VERSION}" > /etc/profile
+SCRIPT
 USER nobody
-ENTRYPOINT ["oq"]
+WORKDIR /home
+ENTRYPOINT ["/bin/sh", "-l"]

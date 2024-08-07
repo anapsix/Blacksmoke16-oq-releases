@@ -5,7 +5,8 @@ export DOCKER_BUILDKIT=1
 export BUILDKIT_PROGRESS=plain
 
 SCRIPT_DIR="$(realpath $(dirname $0))"
-REPO_ROOT="${SCRIPT_DIR}/../../"
+REPO_ROOT="${SCRIPT_DIR}/../.."
+BIN_DIR="$(realpath "${REPO_ROOT}")/bin"
 : ${UPSTREAM_DIR:="${REPO_ROOT}/upstream"}
 
 : ${TARGET_ARCH_LIST:='["arm64","amd64"]'}
@@ -35,7 +36,13 @@ for arch in ${TARGET_ARCH_LIST[@]}; do
   echo "${GA_GROUP_END:-}"
 done
 
-[[ -d "${REPO_ROOT}/bin" ]] || mkdir "${REPO_ROOT}/bin"
+if [[ -d "${BIN_DIR}" ]]; then
+  echo "## cleaning up bin dir (${BIN_DIR})"
+  find "${BIN_DIR}" -maxdepth 1 -mindepth 1 -delete
+else
+  echo "## creating bin dir (${BIN_DIR})"
+  mkdir "${BIN_DIR}"
+fi
 
 for arch in ${TARGET_ARCH_LIST[@]}; do
   echo "${GA_GROUP_BEGIN}retrieving oq binary for linux/${arch}"
@@ -44,7 +51,7 @@ for arch in ${TARGET_ARCH_LIST[@]}; do
     --rm \
     --user root \
     --entrypoint /bin/sh \
-    --volume "${REPO_ROOT}/bin":/mnt/repo/bin \
+    --volume "${BIN_DIR}":/mnt/repo/bin \
     --workdir /mnt/repo \
     oq:${arch} \
     -c 'cp -v "$(realpath $(which oq))" ./bin/'

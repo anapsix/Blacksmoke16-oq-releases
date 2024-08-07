@@ -47,12 +47,6 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
     if ! git diff --quiet; then
       OQ_VERSION+="-dirty"
     fi
-    if [[ "${OQ_BIN_USE_TARGETARCH}" == "true" ]]; then
-      echo >&2 "## using TARGETARCH in oq binary name"
-      OQ_BIN="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-${TARGETARCH}"
-    else
-      OQ_BIN="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-$(uname -m)"
-    fi
     echo >&2 "## building oq ${OQ_VERSION} for linux/${TARGETARCH}"
     shards build \
       --production \
@@ -60,7 +54,10 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
       --static \
       --no-debug \
       --link-flags="-s -Wl,-z,relro,-z,now"
-    mv ./bin/oq ${OQ_BIN}
+    OQ_BIN="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-$(uname -m)"
+    OQ_BIN_TARGETARCH="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-${TARGETARCH}"
+    cp ./bin/oq ${OQ_BIN}
+    cp ./bin/oq ${OQ_BIN_TARGETARCH}
     ln -s ${OQ_BIN} /usr/local/bin/oq
     echo >&2 "## verifying OQ binary and checking version"
     oq --version

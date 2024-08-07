@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.4
+#
 # NOTE: build root is the root of the repo
 
 ARG CRYSTAL_VERSION="1.13.1"
@@ -6,7 +7,10 @@ ARG JQ_VERSION="1.7.1"
 ARG OQ_BIN_DIR="/opt/oq/bin"
 ARG OQ_BIN_USE_TARGETARCH="false"
 
-FROM 84codes/crystal:${CRYSTAL_VERSION}-alpine as build-base
+# base for building the binary
+FROM 84codes/crystal:${CRYSTAL_VERSION}-alpine AS build-base
+LABEL description="This text illustrates \
+that label-values can span multiple lines."
 RUN apk add \
       --update \
       --upgrade \
@@ -15,7 +19,8 @@ RUN apk add \
       git bash curl jq \
       libxml2-dev libxml2-static yaml-dev yaml-static xz-static zlib-static
 
-FROM build-base as build
+# builds the binaries
+FROM build-base AS build
 ARG JQ_VERSION OQ_BIN_DIR OQ_BIN_USE_TARGETARCH TARGETARCH
 WORKDIR /src
 SHELL ["/bin/bash", "-uo", "pipefail", "-c"]
@@ -64,7 +69,8 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
     echo >&2 "## recording "
 SCRIPT
 
-FROM busybox:stable-musl as release
+# final release
+FROM busybox:stable-musl AS release
 LABEL org.opencontainers.image.source=https://github.com/anapsix/Blacksmoke16-oq-releases
 LABEL org.opencontainers.image.description="From https://github.com/Blacksmoke16/oq. A performant, portable jq wrapper that facilitates the consumption and output of formats other than JSON; using jq filters to transform the data."
 LABEL org.opencontainers.image.licenses=MIT

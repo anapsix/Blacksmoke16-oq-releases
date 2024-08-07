@@ -28,8 +28,7 @@ permissions:
   statuses: read
 
 env:
-  GHCR_REPO: "ghcr.io/anapsix/oq"
-  REPO: ${{ github.repository }}
+  GHCR_REPO: ${{ format('ghcr.io/{0}/oq', github.repository_owner) }}
   UPSTREAM_REPO: Blacksmoke16/oq
   UPSTREAM_DIR: ./upstream
   TARGET_ARCH_LIST: '["arm64","amd64"]'
@@ -48,9 +47,11 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
+        retries: 5
+        retry-exempt-status-codes: 400,401,403,404
         script: |
-          const {REPO, UPSTREAM_REPO} = process.env;
-          const [owner, repo] = REPO.split("/");
+          const {GHCR_REPO, UPSTREAM_REPO} = process.env;
+          const [ghcr_domain, ghcr_owner, ghcr_package] = GHCR_REPO.split("/");
           const [uowner, urepo] = UPSTREAM_REPO.split("/");
 
           core.startGroup(`Getting release info for '${UPSTREAM_REPO}'`);
@@ -69,11 +70,11 @@ jobs:
 
           var matching_release = undefined;
           var create_release = true;
-          core.startGroup(`Getting matching release in '${REPO}'`);
+          core.startGroup(`Getting matching release in '${github.repository}'`);
           try {
             matching_release = await github.rest.repos.getReleaseByTag({
-              owner: owner,
-              repo: repo,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
               tag: ulatest_release_tag,
             });
           } catch (e) {
@@ -112,13 +113,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: release_info
     if: ${{ needs.release_info.outputs.create_release == 'true' || needs.release_info.outputs.push_to_ghcr == 'true' }}
+    outputs:
+      images: ${{ steps.get_package_info.outputs.images }}
+      release_body: ${{ steps.get_package_info.outputs.release_body }}
     steps:
     - name: Checkout hack
       uses: actions/checkout@v4
     - name: Checkout oq
       uses: actions/checkout@v4
       with:
-        repository: Blacksmoke16/oq
+        repository: ${{ env.UPSTREAM_REPO }}
         path: ${{ env.UPSTREAM_DIR }}
         fetch-tags: true
     - name: Set up QEMU
@@ -141,34 +145,97 @@ jobs:
         RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
       run: |
         export TARGET_ARCH_LIST=( $(jq -r .[] <<< ${TARGET_ARCH_LIST}) )
-        declare -a MANIFEST_LIST
+        UNNAME_M="$(uname -m)"
+        OQ_BIN="$(find ./bin -type f -executable -name "*${UNNAME_M}*")"
         for arch in ${TARGET_ARCH_LIST[@]}; do
-          echo "::group::pushing linux/${arch}"
-          arch_uri="${GHCR_REPO}:${RELEASE_TAG}-${arch}"
+          echo "::group::linux/${arch}"
+          arch_tag="${RELEASE_TAG}-${arch}"
+          arch_uri="${GHCR_REPO}:${arch_tag}"
           docker tag "oq:${arch}" "${arch_uri}"
           docker push "${arch_uri}"
           echo "::info::pushed ${arch_uri}"
+          docker manifest create --amend "${GHCR_REPO}:${RELEASE_TAG}" "${arch_uri}"
+          echo "::info::added to the manifest"
           echo "::endgroup::"
-          MANIFEST_LIST+=(${arch_uri})
+          arch_digest="$(docker images --no-trunc --quiet "${arch_uri}")"
+          arch_digests+="\n- arch: $arch\n  digest: ${arch_digest}\n  tag: ${arch_tag}\n  uri: ${arch_uri}"
         done
         echo "::group::pushing manifest"
-        docker manifest create "${GHCR_REPO}:${RELEASE_TAG}" ${MANIFEST_LIST[@]}
         docker manifest push "${GHCR_REPO}:${RELEASE_TAG}"
         echo "::info::pushed ${GHCR_REPO}:${RELEASE_TAG}"
         echo "::endgroup::"
-        echo "::group::recording manifest digest"
+        echo "::group::recording digests"
         MANIFEST_DIGEST="$(docker buildx imagetools \
           inspect "${GHCR_REPO}:${RELEASE_TAG}" --format '{{json .}}' \
           | jq -r .manifest.digest)"
-        echo "manifest_digest=${MANIFEST_DIGEST}" | tee -a "${GITHUB_OUTPUT}"
+        arch_digests+="\n- arch: multi\n  digest: ${MANIFEST_DIGEST}\n  tag: ${RELEASE_TAG}\n  uri: ${GHCR_REPO}:${RELEASE_TAG}"
+        ARCH_DIGESTS="$(echo -e "${arch_digests}" | ${OQ_BIN} -i yaml -c .)"
+        echo "arch_digests=${ARCH_DIGESTS}" | tee -a "${GITHUB_OUTPUT}"
         echo "::endgroup::"
-    - name: Generate artifact attestation
-      uses: actions/attest-build-provenance@v1
-      if: ${{ needs.release_info.outputs.push_to_ghcr == 'true' }}
+    - name: Get package info
+      id: get_package_info
+      uses: actions/github-script@v7
+      env:
+        RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
       with:
-        subject-name: ${{ env.GHCR_REPO }}
-        subject-digest: ${{ steps.push_to_ghcr.outputs.manifest_digest }}
-        push-to-registry: true
+        retries: 5
+        retry-exempt-status-codes: 400,401,403,404
+        script: |
+          const {GHCR_REPO, RELEASE_TAG, UPSTREAM_REPO} = process.env;
+          const [ghcr_domain, ghcr_owner, ghcr_package] = GHCR_REPO.split("/");
+
+          var packages, packages_status;
+          var {
+            status: packages_status,
+            data: packages
+          } = await github.rest.packages
+          .getAllPackageVersionsForPackageOwnedByUser({
+            package_type: "container",
+            package_name: ghcr_package,
+            username: ghcr_owner,
+          });
+
+          var images;
+          try {
+            images = packages
+            .filter(pkg => {
+              const tags = pkg.metadata?.container?.tags;
+              return Array.isArray(tags) && tags.some(tag => tag.startsWith(RELEASE_TAG));
+            })
+            .map(pkg => {
+              return {
+                ...pkg,
+                tag: pkg.metadata.container.tags[0],
+              }
+            })
+            .map(pkg => {
+              const arch = pkg.tag.split("-")[1] || "multi";
+              return {
+                arch: arch,
+                digest: pkg.name,
+                html_url: `${pkg.html_url}?tag=${pkg.tag}`,
+                tag: pkg.tag,
+                uri: `${GHCR_REPO}:${pkg.tag}`,
+              }
+            });
+          } catch (e) {
+            core.setFailed(`Failed to get packages for version ${RELEASE_TAG}`);
+          }
+
+          const releaseBody =
+          `Corresponds to [${RELEASE_TAG}][1] release in [${UPSTREAM_REPO}][2].
+
+          The following corresponding Docker images are available:
+          ${images.map(i => `- [\`${i.uri}\`](${i.html_url})`).join('\n')}
+
+          [1]: https://github.com/${UPSTREAM_REPO}/releases/tag/${RELEASE_TAG}
+          [2]: https://github.com/${UPSTREAM_REPO}
+          `;
+
+          core.debug(`images: ${JSON.stringify(images)}`);
+          core.debug(`release_body: ${releaseBody}`);
+          core.setOutput('images', images);
+          core.setOutput('release_body', releaseBody);
     - name: Upload release artifacts
       uses: softprops/action-gh-release@v2
       if: ${{ needs.release_info.outputs.create_release == 'true' }}
@@ -176,8 +243,18 @@ jobs:
         files: ./bin/oq-*
         tag_name: ${{ needs.release_info.outputs.release_tag }}
         make_latest: "true"
-        body: |
-          Corresponds to [${{ needs.release_info.outputs.release_tag }}][1] release in [Blacksmoke16/oq][2].
-
-          [1]: https://github.com/Blacksmoke16/oq/releases/tag/${{ needs.release_info.outputs.release_tag }}
-          [2]: https://github.com/Blacksmoke16/oq
+        body: ${{ steps.get_package_info.outputs.release_body }}
+  build_provenance:
+    runs-on: ubuntu-latest
+    needs: [release_info, dist_linux]
+    if: ${{ needs.release_info.outputs.push_to_ghcr == 'true' }}
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.dist_linux.outputs.images) }}
+    steps:
+    - name: Generate artifact attestation for ${{ matrix.arch }}
+      uses: actions/attest-build-provenance@v1
+      with:
+        subject-name: ${{ matrix.uri }}
+        subject-digest: ${{ matrix.digest }}
+        push-to-registry: true

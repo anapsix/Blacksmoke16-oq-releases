@@ -462,9 +462,21 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        experimental: [true]
         include: ${{ fromJSON(needs.dist_linux.outputs.images_combined) }}
     steps:
+    -
+      name: Login to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    -
+      name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ github.actor }}
+        password: ${{ secrets.DOCKERHUB_RW }}
     -
       name: Attestation for ${{ matrix.oci }}
       uses: actions/attest-build-provenance@v1

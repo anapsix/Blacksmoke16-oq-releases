@@ -60,10 +60,7 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
       --no-debug \
       --link-flags="-s -Wl,-z,relro,-z,now"
     OQ_BIN="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-$(uname -m)"
-    OQ_BIN_TARGETARCH="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-${TARGETARCH}"
-    cp ./bin/oq ${OQ_BIN}
-    cp ./bin/oq ${OQ_BIN_TARGETARCH}
-    ln -s ${OQ_BIN} /usr/local/bin/oq
+    cp ./bin/oq "${OQ_BIN}"
     echo >&2 "## verifying OQ binary and checking version"
     oq --version
     echo >&2 "## recording "
@@ -74,15 +71,21 @@ FROM busybox:stable-musl AS release
 LABEL org.opencontainers.image.source=https://github.com/anapsix/Blacksmoke16-oq-releases
 LABEL org.opencontainers.image.description="From https://github.com/Blacksmoke16/oq. A performant, portable jq wrapper that facilitates the consumption and output of formats other than JSON; using jq filters to transform the data."
 LABEL org.opencontainers.image.licenses=MIT
-ARG OQ_BIN_DIR JQ_VERSION
+ARG OQ_BIN_DIR JQ_VERSION TARGETARCH
 ENV JQ_VERSION=${JQ_VERSION}
-COPY --link --from=build ${OQ_BIN_DIR}/* /usr/local/bin/
+COPY --link --from=build ${OQ_BIN_DIR}/oq* ${OQ_BIN_DIR}/jq* /usr/local/bin/
 RUN <<-SCRIPT
   #!/usr/bin/env sh
   set -euo pipefail
+  UNAME_M="$(uname -m)"
   cd /usr/local/bin
-  find . -type f -executable -name "oq*" -exec ln -s {} oq \;
+  native_arch_bin="$(find . -type f -name "oq-*")"
+  ls -la
+  echo "native_arch_bin: ${native_arch_bin}"
+  ln "${native_arch_bin}" oq
   OQ_VERSION="$(oq --version | oq -i yaml -r .oq)"
+  target_arch_bin="oq-v${OQ_VERSION}-linux-${TARGETARCH}"
+  ln "${native_arch_bin}" "${target_arch_bin}"
   echo "export OQ_VERSION=${OQ_VERSION}" > /etc/profile
 SCRIPT
 USER nobody

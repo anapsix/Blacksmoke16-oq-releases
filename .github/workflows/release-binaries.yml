@@ -205,9 +205,10 @@ jobs:
       RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
       RUN_PROVENANCE: ${{ needs.release_info.outputs.run_provenance == 'true' }}
     outputs:
-      images_ghcr: ${{ steps.get_ghcr_package.outputs.images }}
-      images_dockerhub: ${{ steps.get_dockerhub_package.outputs.images }}
-      images_combined: ${{ steps.prepare_release_body.outputs.images_combined }}
+      packages_ghcr: ${{ steps.get_ghcr_package.outputs.images }}
+      packages_dockerhub: ${{ steps.get_dockerhub_package.outputs.images }}
+      build_assets: ${{ steps.build_assets.outputs.assets }}
+      packages: ${{ steps.combine_packages.outputs.packages }}
       release_body: ${{ steps.prepare_release_body.oututs.body }}
     steps:
     -
@@ -231,6 +232,33 @@ jobs:
       name: Build
       id: build
       run: ./hack/dist/build.sh
+    -
+      name: Get build assets
+      id: build_assets
+      run: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        export IFS=$'\n '
+        prep() {
+          while read -r hash file; do
+            jq -n \
+              --arg a "${file##*-}" \
+              --arg t "asset" \
+              --arg h "sha256:${hash}" \
+              --arg f "${file##*/}" \
+              '{
+                arch: $a,
+                type: $t,
+                file: $f,
+                digest: $h,
+              }'
+          done < <(for i in bin/oq*; do sha256sum $i; done)
+        }
+        assets="$(prep | jq -cs .)"
+        echo "::group::verifying assets value"
+        jq . <<< "${assets}"
+        echo "::endgroup::"
+        echo "assets=${assets}" | tee -a "${GITHUB_OUTPUT}"
     -
       name: Login to GHCR
       uses: docker/login-action@v3
@@ -396,6 +424,7 @@ jobs:
                 html_url: `https://hub.docker.com/repository/docker/${registry_owner}/${registry_package}/tags?name=${tag.name}`,
                 registry: registry_domain,
                 tag: tag.name,
+                type: "container",
                 uri: uri,
                 uri_attestation: uri_attestation,
                 oci: `oci://${uri}`,
@@ -408,27 +437,48 @@ jobs:
           core.debug(`images: ${JSON.stringify(images)}`);
           core.setOutput('images', images);
     -
-      name: Prepare release body
-      id: prepare_release_body
+      name: Combine packages
+      id: combine_packages
       uses: actions/github-script@v7
       if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
       env:
         DOCKERHUB_PACKAGES: ${{ steps.get_dockerhub_package.outputs.images }}
         GHCR_PACKAGES: ${{ steps.get_ghcr_package.outputs.images }}
+        BUILD_ASSETS: ${{ steps.build_assets.outputs.assets }}
+      with:
+        script: |
+          const {BUILD_ASSETS, DOCKERHUB_PACKAGES, GHCR_PACKAGES} = process.env;
+          const buildAssets = JSON.parse(BUILD_ASSETS);
+          const dockerhubPackages = JSON.parse(DOCKERHUB_PACKAGES);
+          const ghcrPackages = JSON.parse(GHCR_PACKAGES);
+          const packagesCombined = [
+            ...buildAssets,
+            ...dockerhubPackages,
+            ...ghcrPackages
+          ];
+          core.startGroup("Verifying packagesCombined");
+          console.log(JSON.stringify(packagesCombined, null, 2));
+          core.endGroup();
+          core.setOutput('packages', packagesCombined);
+    -
+      name: Prepare release body
+      id: prepare_release_body
+      uses: actions/github-script@v7
+      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      env:
+        PACKAGES_COMBINED: ${{ steps.combine_packages.outputs.packages }}
       with:
         retries: 5
         retry-exempt-status-codes: 400,401,403,404
         script: |
-          const {
-            DOCKERHUB_PACKAGES, GHCR_PACKAGES,
-            RELEASE_TAG, UPSTREAM_REPO } = process.env;
-          const dockerhubPackages = JSON.parse(DOCKERHUB_PACKAGES);
-          const ghcrPackages = JSON.parse(GHCR_PACKAGES);
-          const combinedPackages = [ ...dockerhubPackages, ...ghcrPackages ];
-
-          core.startGroup("Verifying combinedPackages");
-          console.log(JSON.stringify(combinedPackages, null, 2));
-          core.endGroup();
+          const {PACKAGES_COMBINED, RELEASE_TAG, UPSTREAM_REPO} = process.env;
+          const packagesCombined = JSON.parse(PACKAGES_COMBINED);
+          const ghcrPackages = packagesCombined.filter(
+            pkg => pkg.registry == 'ghcr.io'
+          );
+          const dockerhubPackages = packagesCombined.filter(
+            pkg => pkg.registry == 'docker.io'
+          );
 
           const releaseBody =
           `Corresponds to [${RELEASE_TAG}][1] release in [${UPSTREAM_REPO}][2].
@@ -443,7 +493,6 @@ jobs:
           [2]: https://github.com/${UPSTREAM_REPO}
           `;
           core.setOutput('body', releaseBody);
-          core.setOutput('images_combined', combinedPackages);
     -
       name: Upload release artifacts
       uses: softprops/action-gh-release@v2
@@ -462,7 +511,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON(needs.dist_linux.outputs.images_combined) }}
+        include: ${{ fromJSON(needs.dist_linux.outputs.packages) }}
     steps:
     -
       name: Login to GHCR
@@ -480,7 +529,16 @@ jobs:
     -
       name: Attestation for ${{ matrix.oci }}
       uses: actions/attest-build-provenance@v1
+      if: ${{ matrix.type == 'container' }}
       with:
         subject-name: ${{ matrix.uri_attestation }}
+        subject-digest: ${{ matrix.digest }}
+        push-to-registry: true
+    -
+      name: Attestation for ${{ matrix.file }}
+      uses: actions/attest-build-provenance@v1
+      if: ${{ matrix.type == 'asset' }}
+      with:
+        subject-name: ${{ matrix.file }}
         subject-digest: ${{ matrix.digest }}
         push-to-registry: true

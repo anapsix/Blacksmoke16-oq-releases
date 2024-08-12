@@ -49,8 +49,6 @@ jobs:
       id: discover
       uses: actions/github-script@v7
       with:
-        retries: 5
-        retry-exempt-status-codes: 400,401,403,404
         script: |
           const {GHCR_REPO, UPSTREAM_REPO, GITHUB_REPOSITORY} = process.env;
           const [registry_domain, registry_owner, registry_package] = GHCR_REPO.split("/");
@@ -58,38 +56,38 @@ jobs:
           const [owner, repo] = GITHUB_REPOSITORY.split("/");
 
           core.startGroup(`Getting release info for ${UPSTREAM_REPO}`);
-          const ulatest_release = await github.rest.repos.getLatestRelease({
+          const ulatest_release_tag = await github.rest.repos.getLatestRelease({
             owner: uowner,
             repo: urepo,
+          })
+          .then(resp => {
+            return resp.data.tag_name;
+          })
+          .catch(e => {
+            core.error(e);
+            core.setFailed(`Failed to latest release in ${UPSTREAM_REPO}`);
           });
-          const ulatest_release_tag = ulatest_release.data.tag_name || undefined;
-
-          core.debug(`Upsteam latests release data:\n${JSON.stringify(ulatest_release)}`);
-          if (ulatest_release.status != 200 || typeof(ulatest_release_tag) == 'undefined') {
-            core.setFailed(`Failed to get release tag for ${UPSTREAM_REPO}`);
-          }
-          core.info(`Latest release in '${UPSTREAM_REPO}' is '${ulatest_release_tag}'`);
           core.endGroup();
 
-          var matching_release = undefined;
-          var create_release = true;
           core.startGroup(`Getting matching release in ${GITHUB_REPOSITORY}`);
-          try {
-            matching_release = await github.rest.repos.getReleaseByTag({
+          const create_release = await github.rest.repos.getReleaseByTag({
               owner: owner,
               repo: repo,
               tag: ulatest_release_tag,
-            });
-          } catch (e) {
-            core.info(`The matching release is not found for '${ulatest_release_tag}' tag`);
-            if (e.name != 'HttpError') {
-              core.setFailed(`Failed to get matching release, with error ${e}`);
+            })
+          .then(resp => {
+            if (resp.status == 200) {
+              return false;
+            };
+            return true;
+          })
+          .catch(e => {
+            if (e.status == 404) {
+              return true;
             }
-          }
-          core.debug(`Matching release data:\n${JSON.stringify(matching_release)}`);
-          if (typeof(matching_release) != 'undefined' && matching_release.status == 200) {
-            create_release = false;
-          }
+            core.error(e);
+            core.setFailed(`Failed to get release for tag ${ulatest_release_tag} in ${GITHUB_REPOSITORY}`);
+          });
           core.endGroup();
 
           core.warning(`release_tag: ${ulatest_release_tag}`);
@@ -207,7 +205,6 @@ jobs:
     outputs:
       packages_ghcr: ${{ steps.get_ghcr_package.outputs.images }}
       packages_dockerhub: ${{ steps.get_dockerhub_package.outputs.images }}
-      build_assets: ${{ steps.build_assets.outputs.assets }}
       packages: ${{ steps.combine_packages.outputs.packages }}
       release_body: ${{ steps.prepare_release_body.oututs.body }}
     steps:
@@ -233,32 +230,14 @@ jobs:
       id: build
       run: ./hack/dist/build.sh
     -
-      name: Get build assets
-      id: build_assets
-      run: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-        export IFS=$'\n '
-        prep() {
-          while read -r hash file; do
-            jq -n \
-              --arg a "${file##*-}" \
-              --arg t "asset" \
-              --arg h "sha256:${hash}" \
-              --arg f "${file##*/}" \
-              '{
-                arch: $a,
-                type: $t,
-                file: $f,
-                digest: $h,
-              }'
-          done < <(for i in bin/oq*; do sha256sum $i; done)
-        }
-        assets="$(prep | jq -cs .)"
-        echo "::group::verifying assets value"
-        jq . <<< "${assets}"
-        echo "::endgroup::"
-        echo "assets=${assets}" | tee -a "${GITHUB_OUTPUT}"
+      name: Upload binary assets
+      uses: actions/upload-artifact@v4
+      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      with:
+        name: oq-binaries
+        path: bin/oq-*
+        if-no-files-found: error
+        retention-days: 1
     -
       name: Login to GHCR
       uses: docker/login-action@v3
@@ -280,8 +259,6 @@ jobs:
       if: ${{ env.PUSH_TO_DOCKERHUB == 'true' || env.PUSH_TO_GHCR == 'true' }}
       run: |
         export TARGET_ARCH_LIST=( $(jq -r .[] <<< ${TARGET_ARCH_LIST}) )
-        UNNAME_M="$(uname -m)"
-        OQ_BIN="$(find ./bin -type f -executable -name "*${UNNAME_M}*")"
         publish_arch() {
           local _repo="${1:?required}"
           local _arch
@@ -319,7 +296,7 @@ jobs:
           publish_arch "${GHCR_REPO}"
         fi
     -
-      name: Get GHCR package info
+      name: Get GHCR packages
       id: get_ghcr_package
       uses: actions/github-script@v7
       if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
@@ -341,49 +318,48 @@ jobs:
             username: registry_owner,
           });
 
-          var images;
-          try {
-            images = packages
-            .filter(pkg => {
-              const tags = pkg.metadata?.container?.tags;
-              return Array.isArray(tags) && tags.some(tag => tag.startsWith(RELEASE_TAG));
-            })
-            .map(pkg => {
-              return {
-                ...pkg,
-                tag: pkg.metadata.container.tags[0],
-              }
-            })
-            .map(pkg => {
-              const arch = pkg.tag.split("-")[1] || "multi";
-              const uri = `${GHCR_REPO}:${pkg.tag}`;
-              return {
-                arch: arch,
-                digest: pkg.name,
-                html_url: `${pkg.html_url}?tag=${pkg.tag}`,
-                registry: registry_domain,
-                tag: pkg.tag,
-                type: "container",
-                uri: uri,
-                uri_attestation: GHCR_REPO,
-                oci: `oci://${uri}`,
-              }
-            });
-          } catch (e) {
+          const images = packages
+          .filter(pkg => {
+            const tags = pkg.metadata?.container?.tags;
+            return Array.isArray(tags) && tags.some(tag => tag.startsWith(RELEASE_TAG));
+          })
+          .map(pkg => {
+            return {
+              ...pkg,
+              tag: pkg.metadata.container.tags[0],
+            }
+          })
+          .map(pkg => {
+            const arch = pkg.tag.split("-")[1] || "multi";
+            const uri = `${GHCR_REPO}:${pkg.tag}`;
+            return {
+              arch: arch,
+              digest: pkg.name,
+              html_url: `${pkg.html_url}?tag=${pkg.tag}`,
+              registry: registry_domain,
+              tag: pkg.tag,
+              type: "container",
+              uri: uri,
+              uri_attestation: GHCR_REPO,
+              oci: `oci://${uri}`,
+            }
+          })
+          .catch(e => {
             core.setFailed(`Failed to get packages for version ${RELEASE_TAG}`);
-          }
-          core.debug(`images: ${JSON.stringify(images)}`);
+          });
+
+          core.startGroup("Verifying");
+          console.log(JSON.stringify(images, null, 2));
+          core.endGroup();
           core.setOutput('images', images);
     -
-      name: Get Docker Hub package info
+      name: Get Docker Hub packages
       id: get_dockerhub_package
       uses: actions/github-script@v7
       if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
       env:
         DOCKERHUB_RW: ${{ secrets.DOCKERHUB_RW }}
       with:
-        retries: 5
-        retry-exempt-status-codes: 400,401,403,404
         script: |
           const {DOCKERHUB_REPO, DOCKERHUB_RW, RELEASE_TAG, UPSTREAM_REPO} = process.env;
           const [registry_domain, registry_owner, registry_package] = DOCKERHUB_REPO.split("/");
@@ -398,8 +374,8 @@ jobs:
           })
           .then(response => response.json())
           .then(resJSON => resJSON.token)
-          .catch(error => {
-            core.error(error);
+          .catch(e => {
+            core.error(e);
             core.setFailed('Failed to get Docker Hub token');
           });
 
@@ -430,11 +406,13 @@ jobs:
                 oci: `oci://${uri}`,
               }
           }))
-          .catch(function (error) {
-            core.error(error);
+          .catch(e => {
+            core.error(e);
             core.setFailed('Failed to list images in Docker Hub');
           });
-          core.debug(`images: ${JSON.stringify(images)}`);
+          core.startGroup("Verifying");
+          console.log(JSON.stringify(images, null, 2));
+          core.endGroup();
           core.setOutput('images', images);
     -
       name: Combine packages
@@ -444,15 +422,12 @@ jobs:
       env:
         DOCKERHUB_PACKAGES: ${{ steps.get_dockerhub_package.outputs.images }}
         GHCR_PACKAGES: ${{ steps.get_ghcr_package.outputs.images }}
-        BUILD_ASSETS: ${{ steps.build_assets.outputs.assets }}
       with:
         script: |
-          const {BUILD_ASSETS, DOCKERHUB_PACKAGES, GHCR_PACKAGES} = process.env;
-          const buildAssets = JSON.parse(BUILD_ASSETS);
+          const {DOCKERHUB_PACKAGES, GHCR_PACKAGES} = process.env;
           const dockerhubPackages = JSON.parse(DOCKERHUB_PACKAGES);
           const ghcrPackages = JSON.parse(GHCR_PACKAGES);
           const packagesCombined = [
-            ...buildAssets,
             ...dockerhubPackages,
             ...ghcrPackages
           ];
@@ -535,10 +510,12 @@ jobs:
         subject-digest: ${{ matrix.digest }}
         push-to-registry: true
     -
-      name: Attestation for ${{ matrix.file }}
-      uses: actions/attest-build-provenance@v1
-      if: ${{ matrix.type == 'asset' }}
+      name: Download binary assets
+      uses: actions/download-artifact@v4
       with:
-        subject-name: ${{ matrix.file }}
-        subject-digest: ${{ matrix.digest }}
-        push-to-registry: true
+        name: oq-binaries
+    -
+      name: Attestation for assets
+      uses: actions/attest-build-provenance@v1
+      with:
+        subject-path: bin/oq-*

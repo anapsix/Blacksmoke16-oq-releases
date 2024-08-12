@@ -111,6 +111,7 @@ jobs:
 
         TARGET_ARCH_LIST=( $(jq -r .[] <<< ${TARGET_ARCH_LIST:?required}) )
         ATTESTATION_ERRORS=0
+        TEST_COUNT=0
 
         pcheck_uris() {
           local _uris=( ${@} )
@@ -130,10 +131,11 @@ jobs:
               let ATTESTATION_ERRORS+=1
               let _errors+=1
             fi
+            let TEST_COUNT+=2
             echo "::endgroup::"
           done
           if [[ ${_errors} -gt 0 ]]; then
-            echo "::error::errors encountered, whole ${ATTESTATION_ERRORS} of them"
+            echo "::error::errors encountered, whole ${_errors} of them"
             return 1
           fi
         }
@@ -155,7 +157,7 @@ jobs:
           echo "::info::all URIs verified successfully"
           RUN_PROVENANCE="false"
         else
-          echo "::error::URIs did not pass verification, total ${ATTESTATION_ERRORS} failures in ${#URIS[@]} tests"
+          echo "::error::URIs did not pass verification, total ${ATTESTATION_ERRORS} failures in ${TEST_COUNT} tests"
         fi
 
         echo "run_provenance=${RUN_PROVENANCE}" | tee -a "${GITHUB_OUTPUT}"
@@ -301,8 +303,6 @@ jobs:
       uses: actions/github-script@v7
       if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
       with:
-        retries: 5
-        retry-exempt-status-codes: 400,401,403,404
         script: |
           const {GHCR_REPO, RELEASE_TAG, UPSTREAM_REPO} = process.env;
           const [registry_domain, registry_owner, registry_package] = GHCR_REPO.split("/");
@@ -318,35 +318,37 @@ jobs:
             username: registry_owner,
           });
 
-          const images = packages
-          .filter(pkg => {
-            const tags = pkg.metadata?.container?.tags;
-            return Array.isArray(tags) && tags.some(tag => tag.startsWith(RELEASE_TAG));
-          })
-          .map(pkg => {
-            return {
-              ...pkg,
-              tag: pkg.metadata.container.tags[0],
-            }
-          })
-          .map(pkg => {
-            const arch = pkg.tag.split("-")[1] || "multi";
-            const uri = `${GHCR_REPO}:${pkg.tag}`;
-            return {
-              arch: arch,
-              digest: pkg.name,
-              html_url: `${pkg.html_url}?tag=${pkg.tag}`,
-              registry: registry_domain,
-              tag: pkg.tag,
-              type: "container",
-              uri: uri,
-              uri_attestation: GHCR_REPO,
-              oci: `oci://${uri}`,
-            }
-          })
-          .catch(e => {
+          var images;
+          try {
+            images = packages
+            .filter(pkg => {
+              const tags = pkg.metadata?.container?.tags;
+              return Array.isArray(tags) && tags.some(tag => tag.startsWith(RELEASE_TAG));
+            })
+            .map(pkg => {
+              return {
+                ...pkg,
+                tag: pkg.metadata.container.tags[0],
+              }
+            })
+            .map(pkg => {
+              const arch = pkg.tag.split("-")[1] || "multi";
+              const uri = `${GHCR_REPO}:${pkg.tag}`;
+              return {
+                arch: arch,
+                digest: pkg.name,
+                html_url: `${pkg.html_url}?tag=${pkg.tag}`,
+                registry: registry_domain,
+                tag: pkg.tag,
+                type: "container",
+                uri: uri,
+                uri_attestation: GHCR_REPO,
+                oci: `oci://${uri}`,
+              }
+            });
+          } catch (e) {
             core.setFailed(`Failed to get packages for version ${RELEASE_TAG}`);
-          });
+          }
 
           core.startGroup("Verifying");
           console.log(JSON.stringify(images, null, 2));
@@ -443,8 +445,6 @@ jobs:
       env:
         PACKAGES_COMBINED: ${{ steps.combine_packages.outputs.packages }}
       with:
-        retries: 5
-        retry-exempt-status-codes: 400,401,403,404
         script: |
           const {PACKAGES_COMBINED, RELEASE_TAG, UPSTREAM_REPO} = process.env;
           const packagesCombined = JSON.parse(PACKAGES_COMBINED);

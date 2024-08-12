@@ -42,7 +42,7 @@ jobs:
       create_release: ${{ steps.discover.outputs.create_release }}
       push_to_ghcr: ${{ steps.check_ghcr.outputs.push_to_ghcr }}
       push_to_dockerhub: ${{ steps.check_dockerhub.outputs.push_to_dockerhub }}
-      run_provenance: ${{ steps.check_provenance.outputs.run_provenance }}
+      attest_images: ${{ steps.check_image_provenance.outputs.attest_images }}
     steps:
     -
       name: Discover
@@ -95,8 +95,8 @@ jobs:
           core.setOutput('release_tag', ulatest_release_tag);
           core.setOutput('create_release', create_release);
     -
-      name: Check provenance attestations
-      id: check_provenance
+      name: Check image provenance attestations
+      id: check_image_provenance
       env:
         RELEASE_TAG: ${{ steps.discover.outputs.release_tag }}
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,16 +151,16 @@ jobs:
           done
         done
 
-        RUN_PROVENANCE="true"
+        ATTEST_IMAGES="true"
 
         if pcheck_uris ${URIS[@]}; then
           echo "::info::all URIs verified successfully"
-          RUN_PROVENANCE="false"
+          ATTEST_IMAGES="false"
         else
           echo "::error::URIs did not pass verification, total ${ATTESTATION_ERRORS} failures in ${TEST_COUNT} tests"
         fi
 
-        echo "run_provenance=${RUN_PROVENANCE}" | tee -a "${GITHUB_OUTPUT}"
+        echo "attest_images=${ATTEST_IMAGES}" | tee -a "${GITHUB_OUTPUT}"
     -
       name: Login to GHCR
       uses: docker/login-action@v3
@@ -197,18 +197,19 @@ jobs:
   dist_linux:
     runs-on: ubuntu-latest
     needs: release_info
-    if: ${{ needs.release_info.outputs.create_release == 'true' || needs.release_info.outputs.push_to_ghcr == 'true' || needs.release_info.outputs.push_to_dockerhub == 'true' || needs.release_info.outputs.run_provenance == 'true' }}
+    if: ${{ needs.release_info.outputs.create_release == 'true' || needs.release_info.outputs.push_to_ghcr == 'true' || needs.release_info.outputs.push_to_dockerhub == 'true' || needs.release_info.outputs.attest_images == 'true' }}
     env:
       CREATE_RELEASE: ${{ needs.release_info.outputs.create_release == 'true' }}
       PUSH_TO_DOCKERHUB: ${{ needs.release_info.outputs.push_to_dockerhub == 'true' }}
       PUSH_TO_GHCR: ${{ needs.release_info.outputs.push_to_ghcr == 'true' }}
       RELEASE_TAG: ${{ needs.release_info.outputs.release_tag }}
-      RUN_PROVENANCE: ${{ needs.release_info.outputs.run_provenance == 'true' }}
+      ATTEST_IMAGES: ${{ needs.release_info.outputs.attest_images == 'true' }}
     outputs:
       packages_ghcr: ${{ steps.get_ghcr_package.outputs.images }}
       packages_dockerhub: ${{ steps.get_dockerhub_package.outputs.images }}
       packages: ${{ steps.combine_packages.outputs.packages }}
-      release_body: ${{ steps.prepare_release_body.oututs.body }}
+      release_body: ${{ steps.prepare_release_body.outputs.body }}
+      attest_assets: ${{ steps.check_assets_provenance.outputs.attest_assets }}
     steps:
     -
       name: Checkout hack
@@ -232,9 +233,64 @@ jobs:
       id: build
       run: ./hack/dist/build.sh
     -
+      name: Check release assets provenance attestations
+      id: check_assets_provenance
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        : ${GITHUB_REPOSITORY:?"required"}
+        if [[ -z "${GITHUB_REPOSITORY_OWNER:-}" ]]; then
+          GITHUB_REPOSITORY_OWNER="${GITHUB_REPOSITORY%%/*}"
+        fi
+
+        ASSET_LIST=( $(find ./bin -type f -name "oq-*") )
+        ATTESTATION_ERRORS=0
+        TEST_COUNT=0
+
+        pcheck_paths() {
+          local _paths=( ${@} )
+          local _errors=0
+          if [[ ${#_paths[@]} -lt 1 ]]; then
+            echo "::error::no paths passed, failing"
+            exit 1
+          fi
+          local _path
+          for _path in ${_paths[@]}; do
+            echo "::group::checking ${_path}"
+            if ! gh attestation verify "${_path}" --owner ${GITHUB_REPOSITORY_OWNER}; then
+              let ATTESTATION_ERRORS+=1
+              let _errors+=1
+            fi
+            if ! gh attestation verify "${_path}" --repo "${GITHUB_REPOSITORY}"; then
+              let ATTESTATION_ERRORS+=1
+              let _errors+=1
+            fi
+            let TEST_COUNT+=2
+            echo "::endgroup::"
+          done
+          if [[ ${_errors} -gt 0 ]]; then
+            echo "::error::errors encountered, whole ${_errors} of them"
+            return 1
+          fi
+        }
+
+        ATTEST_ASSETS="true"
+
+        if pcheck_path ${ASSET_LIST[@]}; then
+          echo "::info::all paths verified successfully"
+          ATTEST_ASSETS="false"
+        else
+          echo "::error::assets did not pass verification, total ${ATTESTATION_ERRORS} failures in ${TEST_COUNT} tests"
+        fi
+
+        echo "attest_assets=${ATTEST_ASSETS}" | tee -a "${GITHUB_OUTPUT}"
+    -
       name: Upload binary assets
       uses: actions/upload-artifact@v4
-      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      if: ${{ env.CREATE_RELEASE == 'true' }}
       with:
         name: oq-binaries
         path: bin/oq-*
@@ -301,7 +357,7 @@ jobs:
       name: Get GHCR packages
       id: get_ghcr_package
       uses: actions/github-script@v7
-      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      if: ${{ env.CREATE_RELEASE == 'true' || env.ATTEST_IMAGES == 'true' }}
       with:
         script: |
           const {GHCR_REPO, RELEASE_TAG, UPSTREAM_REPO} = process.env;
@@ -358,7 +414,7 @@ jobs:
       name: Get Docker Hub packages
       id: get_dockerhub_package
       uses: actions/github-script@v7
-      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      if: ${{ env.CREATE_RELEASE == 'true' || env.ATTEST_IMAGES == 'true' }}
       env:
         DOCKERHUB_RW: ${{ secrets.DOCKERHUB_RW }}
       with:
@@ -420,7 +476,7 @@ jobs:
       name: Combine packages
       id: combine_packages
       uses: actions/github-script@v7
-      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      if: ${{ env.CREATE_RELEASE == 'true' || env.ATTEST_IMAGES == 'true' }}
       env:
         DOCKERHUB_PACKAGES: ${{ steps.get_dockerhub_package.outputs.images }}
         GHCR_PACKAGES: ${{ steps.get_ghcr_package.outputs.images }}
@@ -441,7 +497,7 @@ jobs:
       name: Prepare release body
       id: prepare_release_body
       uses: actions/github-script@v7
-      if: ${{ env.CREATE_RELEASE == 'true' || env.RUN_PROVENANCE == 'true' }}
+      if: ${{ env.CREATE_RELEASE == 'true' }}
       env:
         PACKAGES_COMBINED: ${{ steps.combine_packages.outputs.packages }}
       with:
@@ -477,10 +533,10 @@ jobs:
         tag_name: ${{ needs.release_info.outputs.release_tag }}
         make_latest: "true"
         body: ${{ steps.prepare_release_body.outputs.body }}
-  container_provenance:
+  attest_images:
     runs-on: ubuntu-latest
     needs: [release_info, dist_linux]
-    if: ${{ needs.release_info.outputs.run_provenance == 'true' }}
+    if: ${{ needs.release_info.outputs.attest_images == 'true' }}
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -509,10 +565,10 @@ jobs:
         subject-name: ${{ matrix.uri_attestation }}
         subject-digest: ${{ matrix.digest }}
         push-to-registry: true
-  assets_provenance:
+  attest_assets:
     runs-on: ubuntu-latest
-    needs: [release_info, dist_linux]
-    if: ${{ needs.release_info.outputs.create_release == 'true' }}
+    needs: [dist_linux]
+    if: ${{ needs.dist_linux.outputs.attest_assets == 'true' }}
     steps:
     -
       name: Download binary assets

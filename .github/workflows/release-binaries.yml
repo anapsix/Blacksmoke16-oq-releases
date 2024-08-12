@@ -477,7 +477,7 @@ jobs:
         tag_name: ${{ needs.release_info.outputs.release_tag }}
         make_latest: "true"
         body: ${{ steps.prepare_release_body.outputs.body }}
-  build_provenance:
+  container_provenance:
     runs-on: ubuntu-latest
     needs: [release_info, dist_linux]
     if: ${{ needs.release_info.outputs.run_provenance == 'true' }}
@@ -509,13 +509,29 @@ jobs:
         subject-name: ${{ matrix.uri_attestation }}
         subject-digest: ${{ matrix.digest }}
         push-to-registry: true
+  assets_provenance:
+    runs-on: ubuntu-latest
+    needs: [release_info, dist_linux]
+    if: ${{ needs.release_info.outputs.create_release == 'true' }}
+    steps:
     -
       name: Download binary assets
       uses: actions/download-artifact@v4
       with:
         name: oq-binaries
+        path: ./bin
+    -
+      name: Verify retrieved binary assets
+      run: ls -la ./bin
     -
       name: Attestation for assets
       uses: actions/attest-build-provenance@v1
+      id: attest_assets
       with:
         subject-path: bin/oq-*
+    -
+      name: Output attestation results
+      env:
+        ATTEST_BUNDLE_PATH: ${{ steps.attest_assets.outputs.bundle-path }}
+      run:
+        jq . "${ATTEST_BUNDLE_PATH}"

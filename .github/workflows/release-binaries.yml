@@ -280,7 +280,7 @@ jobs:
 
         ATTEST_ASSETS="true"
 
-        if pcheck_path ${ASSET_LIST[@]}; then
+        if pcheck_paths ${ASSET_LIST[@]}; then
           echo "::info::all paths verified successfully"
           ATTEST_ASSETS="false"
         else

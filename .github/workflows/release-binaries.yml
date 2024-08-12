@@ -5,6 +5,7 @@ on:
   - cron: '00 10 * * *'
   push:
     branches:
+    - 'main'
     - 'workflow-test'
 
 concurrency:

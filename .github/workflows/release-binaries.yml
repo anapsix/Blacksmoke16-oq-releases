@@ -155,7 +155,7 @@ jobs:
         ATTEST_IMAGES="true"
 
         if pcheck_uris ${URIS[@]}; then
-          echo "::notice::all URIs verified successfully"
+          echo "::notice::all images verified successfully"
           ATTEST_IMAGES="false"
         else
           echo "::error::URIs did not pass verification, total ${ATTESTATION_ERRORS} failures in ${TEST_COUNT} tests"

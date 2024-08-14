@@ -1,4 +1,5 @@
-# syntax=docker/dockerfile:1.4
+# syntax=docker/dockerfile:1.5-labs
+# 1.5-labs is required when using "ADD --keep-git-dir=true"
 #
 # NOTE: build root is the root of the repo
 
@@ -6,6 +7,9 @@ ARG CRYSTAL_VERSION="1.13.1"
 ARG JQ_VERSION="1.7.1"
 ARG OQ_BIN_DIR="/opt/oq/bin"
 ARG OQ_BIN_USE_TARGETARCH="false"
+
+ARG UPSTREAM_GIT_URI="https://github.com/Blacksmoke16/oq.git"
+ARG UPSTREAM_GIT_REF
 
 # base for building the binary
 FROM 84codes/crystal:${CRYSTAL_VERSION}-alpine AS build-base
@@ -19,12 +23,23 @@ RUN apk add \
       git bash curl jq \
       libxml2-dev libxml2-static yaml-dev yaml-static xz-static zlib-static
 
+# by using a separate stage, we can override the "upstream" context when desired
+# i.e. docker buildx build --build-context <context_name>=<path>
+# e.g. of "build-context" values
+# - "--build-context=upstream=./upstream"
+# - "--build-context=upstream=https://github.com/Blacksmoke16/oq.git#v1.3.5"
+# see https://docs.docker.com/reference/cli/docker/buildx/build/#build-context
+FROM scratch as upstream
+ARG UPSTREAM_GIT_REF UPSTREAM_GIT_URI
+ADD --link --keep-git-dir=true \
+    ${UPSTREAM_GIT_URI}${UPSTREAM_GIT_REF:+"#${UPSTREAM_GIT_REF}"} /
+
 # builds the binaries
 FROM build-base AS build
 ARG JQ_VERSION OQ_BIN_DIR OQ_BIN_USE_TARGETARCH TARGETARCH
 WORKDIR /src
-SHELL ["/bin/bash", "-uo", "pipefail", "-c"]
-RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN --mount=type=bind,from=upstream,source=/,target=/src,rw <<-SCRIPT
     #!/usr/bin/env bash
     mkdir -p "${OQ_BIN_DIR}"
     echo >&2 "## downloading jq"
@@ -38,13 +53,11 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
     chmod +x "${OQ_BIN_DIR}/jq"
     "${OQ_BIN_DIR}/jq" --version || exit 1
     echo >&2 "## resolving OQ version"
-    OQ_VERSION="$(git describe --exact-match --tags HEAD 2>/dev/null)"
-    if [[ $? -eq 0 ]]; then
+    if OQ_VERSION="$(git describe --exact-match --tags HEAD 2>/dev/null)"; then
       echo >&2 "### the HEAD is tagged"
     else
       echo >&2 "### the HEAD is not tagged"
-      OQ_VERSION="$(git rev-parse --short=8 HEAD)"
-      if [[ $? -ne 0 ]]; then
+      if ! OQ_VERSION="$(git rev-parse --short HEAD)"; then
         echo >&2 "### failed to get the SHA of the HEAD"
         exit 1
       fi
@@ -62,7 +75,7 @@ RUN --mount=type=bind,source=.,target=/src,rw <<-SCRIPT
     OQ_BIN="${OQ_BIN_DIR}/oq-${OQ_VERSION}-linux-$(uname -m)"
     cp ./bin/oq "${OQ_BIN}"
     echo >&2 "## verifying OQ binary and checking version"
-    oq --version
+    ${OQ_BIN} --version
     echo >&2 "## recording "
 SCRIPT
 

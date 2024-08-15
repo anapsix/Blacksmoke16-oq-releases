@@ -32,7 +32,6 @@ env:
   GHCR_REPO: ${{ format('ghcr.io/{0}/oq', github.repository_owner) }}
   DOCKERHUB_REPO: ${{ format('docker.io/{0}/oq', github.repository_owner) }}
   UPSTREAM_REPO: Blacksmoke16/oq
-  UPSTREAM_DIR: ./upstream
   TARGET_ARCH_LIST: '["arm64","amd64"]'
 
 jobs:
@@ -213,16 +212,8 @@ jobs:
       attest_assets: ${{ steps.check_assets_provenance.outputs.attest_assets }}
     steps:
     -
-      name: Checkout hack
+      name: Checkout
       uses: actions/checkout@v4
-    -
-      name: Checkout oq
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ env.UPSTREAM_REPO }}
-        ref: ${{ format('refs/tags/{0}', env.RELEASE_TAG) }}
-        path: ${{ env.UPSTREAM_DIR }}
-        fetch-tags: true
     -
       name: Set up QEMU
       uses: docker/setup-qemu-action@v3
@@ -232,6 +223,8 @@ jobs:
     -
       name: Build
       id: build
+      env:
+        UPSTREAM_GIT_REF: ${{ env.RELEASE_TAG }}
       run: ./hack/dist/build.sh
     -
       name: Check release assets provenance attestations
